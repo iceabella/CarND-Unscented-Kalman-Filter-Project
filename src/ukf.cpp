@@ -44,6 +44,12 @@ UKF::UKF() {
   // predicted sigma points matrix
   Xsig_pred_ = MatrixXd(n_x_, 2*n_aug_+1);
 
+  // Measurement noise covariance matrix for radar
+  R_radar_ = MatrixXd(3,3);
+
+  // Measurement noise covariance matrix for lidar
+  R_lidar_ = MatrixXd(2,2);
+
   // Process noise standard deviation longitudinal acceleration in m/s^2
   std_a_ = 2;	// tunable parameter
 
@@ -113,12 +119,27 @@ void UKF::ProcessMeasurement(MeasurementPackage meas_package) {
 	x_(3) = 0.0; 
 	x_(4) = 0.0; // we cannot measure v, yaw or yaw rate for laser
     }
+    // Make sure data is reliable, too close to our sensor position
+    if(fabs(x_(0)) <= 0.001 && fabs(x_(1)) <= 0.001){
+	x_(0) = 0.001;
+	x_(1) = 0.001;
+    }
+
     // Initialize covariance matrix   
     P_ << 0.8, 0, 0, 0, 0,
 	  0, 0.8, 0, 0, 0,
 	  0, 0, 10, 0, 0,
 	  0, 0, 0, 10, 0,
-	  0, 0, 0, 0, 10; // we are very uncertain of our starting values
+	  0, 0, 0, 0, 10; // we are uncertain of our starting values in v, yaw and yaw rate
+
+    // Initialize measurement noise covariance matrix radar
+    R_radar_ << std_radr_*std_radr_, 0, 0,
+               0, std_radphi_*std_radphi_, 0,
+               0, 0, std_radrd_*std_radrd_;
+
+    // Initialize measurement noise covariance matrix lidar
+    R_lidar_ << std_laspx_*std_laspx_, 0,
+       	       0, std_laspy_*std_laspy_;
 
     // Initialize weights
     weights_(0) = lambda_ / (lambda_ + n_aug_);
@@ -130,10 +151,16 @@ void UKF::ProcessMeasurement(MeasurementPackage meas_package) {
     return;
   }
   // Define time interval between measurements
-  double dt = (meas_package.timestamp_-time_us_)/1000000.0; // s WHAT HAPPENS IF WE DO NOT USE THE MEASUREMENT?
+  double dt = (meas_package.timestamp_-time_us_)/1000000.0; // s 
   time_us_ = meas_package.timestamp_;
 
   // 1. PREDICT
+  // avoid to big prediction step
+  while(dt > 0.15){
+	double step = 0.15;
+	Prediction(step);
+	dt -= step;
+  }
   Prediction(dt);
 
   // 2. UPDATE BASED ON NEW MEASUREMENT
@@ -279,9 +306,7 @@ void UKF::UpdateLidar(MeasurementPackage meas_package) {
        0, 1.0, 0, 0, 0;	// we only measure position in x and y
 
   // define measurement noise
-  MatrixXd R = MatrixXd(2,2);
-  R << std_laspx_*std_laspx_, 0,
-       0, std_laspy_*std_laspy_;
+  MatrixXd R = R_lidar_;
 
   VectorXd y = z-H*x_;
   MatrixXd HT = H.transpose();
@@ -338,16 +363,17 @@ void UKF::UpdateRadar(MeasurementPackage meas_package) {
       // transformation made with assumption w = 0 (z=h(x)+w)
       Zsig(0,i) = sqrt(px*px+py*py);
       Zsig(1,i) = atan2(py,px);
-      Zsig(2,i) = (px*cos(psi)*v + py*sin(psi)*v)/Zsig(0,i);
+      if(fabs(Zsig(0,i)) < 0.001)
+	Zsig(2,i) = 1/sqrt(2)*(cos(psi)*v + sin(psi)*v); // limit when px,py->0
+      else
+      	Zsig(2,i) = (px*cos(psi)*v + py*sin(psi)*v)/Zsig(0,i);
   }
   //calculate mean predicted measurement
   for(int i=0; i<2*n_aug_+1; i++)
     z_pred += weights_(i)*Zsig.col(i);
   
-  MatrixXd R = MatrixXd(3,3);
-  R << std_radr_*std_radr_, 0, 0,
-       0, std_radphi_*std_radphi_, 0,
-       0, 0, std_radrd_*std_radrd_;
+  MatrixXd R = R_radar_;
+
   //calculate measurement covariance matrix S
   for(int i=0; i<2*n_aug_+1; i++){
       // calculate residual
